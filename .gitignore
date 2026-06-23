@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.joblib
+*.db
+*.pkl
+backend/data/raw/*.csv
+backend/data/*.csv
+.DS_Store
+Thumbs.db
