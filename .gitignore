@@ -2,7 +2,6 @@
 .venv/
 __pycache__/
 *.pyc
-*.joblib
 *.db
 *.pkl
 backend/data/raw/*.csv
