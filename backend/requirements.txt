@@ -13,6 +13,7 @@ google-generativeai==0.8.3
 jupyter==1.1.1
 requests==2.32.3
 joblib==1.5.3
+apscheduler==3.10.4
 # NOTE: xgboost==2.1.4 and shap==0.46.0 must be pinned together.
 # Newer xgboost versions conflict with shap 0.46.x.
 # Do NOT run pip install --upgrade on either package.

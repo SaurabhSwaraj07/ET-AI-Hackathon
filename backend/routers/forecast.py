@@ -1,9 +1,14 @@
 """
 forecast.py — GET /api/forecast/{station_name}
 Runs XGBoost inference and returns a 24-hour PM2.5 forecast array.
+
+Day 7 additions:
+  - _run_forecast_for_station() extracted so APScheduler can call it directly.
+  - Cache-hit path: returns DB forecast if generated < 60 min ago.
 """
 import json
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timezone, timedelta
 
 import numpy as np
 import pandas as pd
@@ -13,59 +18,54 @@ from fastapi import APIRouter, HTTPException
 from database import get_recent_readings, get_latest_forecast, upsert_forecast
 from ml_loader import get_model, get_feature_cols
 
+logger = logging.getLogger("airiq.forecast")
 router = APIRouter(tags=["forecast"])
 
+FORECAST_TTL_MINUTES = 60  # cache lifetime
+
+
+# ---------------------------------------------------------------------------
+# Feature engineering (shared with attribution.py)
+# ---------------------------------------------------------------------------
 
 def _build_feature_row(readings: list[dict], feature_cols: list[str]) -> pd.DataFrame:
     """
     Build a single-row feature DataFrame from the last 48 readings.
     Matches the exact column order from feature_cols.json.
-    Column engineering must mirror 02_feature_engineering.ipynb.
     """
     if not readings:
         raise ValueError("No readings available for feature engineering.")
 
-    # Use the most recent reading as the base row
     latest = readings[-1]
 
-    # --- Lag features ---
     pm25_values = [r.get("pm25") or 0.0 for r in readings]
 
-    lag_1h   = pm25_values[-2] if len(pm25_values) >= 2  else 0.0
-    lag_24h  = pm25_values[-25] if len(pm25_values) >= 25 else pm25_values[0]
-    roll_6   = pm25_values[-6:] if len(pm25_values) >= 6  else pm25_values
-    roll_mean_6h = float(np.mean(roll_6))
-    roll_std_6h  = float(np.std(roll_6)) if len(roll_6) > 1 else 0.0
+    lag_1h        = pm25_values[-2]  if len(pm25_values) >= 2  else 0.0
+    lag_24h       = pm25_values[-25] if len(pm25_values) >= 25 else pm25_values[0]
+    roll_6        = pm25_values[-6:] if len(pm25_values) >= 6  else pm25_values
+    roll_mean_6h  = float(np.mean(roll_6))
+    roll_std_6h   = float(np.std(roll_6)) if len(roll_6) > 1 else 0.0
 
-    # --- Time features ---
     try:
         ts = pd.to_datetime(latest["timestamp"])
     except Exception:
         ts = pd.Timestamp.now()
 
-    # --- Assemble base dict with all possible column names ---
     row = {
-        # Pollutant readings
         "pm25":                   latest.get("pm25")  or 0.0,
         "pm10":                   latest.get("pm10")  or 0.0,
         "no2":                    latest.get("no2")   or 0.0,
         "so2":                    latest.get("so2")   or 0.0,
         "co":                     latest.get("co")    or 0.0,
-
-        # Lag features
         "pm25_lag_1h":            lag_1h,
         "pm25_lag_24h":           lag_24h,
         "pm25_rolling_mean_6h":   roll_mean_6h,
         "pm25_rolling_std_6h":    roll_std_6h,
-
-        # Time features
         "hour":                   ts.hour,
         "dayofweek":              ts.dayofweek,
         "month":                  ts.month,
         "is_weekend":             int(ts.dayofweek >= 5),
-
-        # Weather placeholders (ERA5 columns from feature matrix)
-        # These will be replaced by real OpenWeather data on Day 9
+        # Weather placeholders — replaced by OpenWeather on Day 9
         "temperature_2m":         28.0,
         "relative_humidity_2m":   60.0,
         "wind_speed_10m":         5.0,
@@ -77,7 +77,6 @@ def _build_feature_row(readings: list[dict], feature_cols: list[str]) -> pd.Data
         "boundary_layer_height":  500.0,
     }
 
-    # Build DataFrame with exactly the columns in feature_cols, in order
     df = pd.DataFrame([row])
     for col in feature_cols:
         if col not in df.columns:
@@ -86,58 +85,40 @@ def _build_feature_row(readings: list[dict], feature_cols: list[str]) -> pd.Data
     return df[feature_cols]
 
 
-@router.get("/forecast/{station_name}")
-def get_forecast(station_name: str):
-    """
-    Run XGBoost inference for the given station.
-    Returns a 24-element array of predicted PM2.5 values (µg/m³).
+# ---------------------------------------------------------------------------
+# Core inference — callable by both the router AND the scheduler
+# ---------------------------------------------------------------------------
 
-    MVP approach: predict next hour from current features, then
-    use that prediction as pm25_lag_1h for hour+1 (iterative rollout).
+def _run_forecast_for_station(station_name: str) -> list[float]:
     """
-    # --- Load ML artifacts (cached after first call) ---
-    try:
-        model = get_model()
-        feature_cols = get_feature_cols()
-    except FileNotFoundError as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"ML model not found. Run model training first. ({e})"
-        )
+    Run 24-hour XGBoost iterative rollout for a station.
+    Persists result to DB. Returns list of 24 PM2.5 floats.
+    Raises ValueError / FileNotFoundError on failure (caller handles logging).
+    """
+    model        = get_model()
+    feature_cols = get_feature_cols()
 
-    # --- Get recent readings ---
     readings = get_recent_readings(station_name, n=48)
     if not readings:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No readings found for station '{station_name}'. Check station name."
-        )
+        raise ValueError(f"No readings in DB for '{station_name}'.")
 
-    # --- Generate 24-hour iterative forecast ---
-    forecast_values = []
-    current_readings = list(readings)  # copy so we can append predictions
+    forecast_values  = []
+    current_readings = list(readings)
 
-    try:
-        for hour_offset in range(24):
-            feature_df = _build_feature_row(current_readings, feature_cols)
-            dmatrix = xgb.DMatrix(feature_df, feature_names=feature_cols)
-            prediction = float(model.predict(dmatrix)[0])
-            # Clamp to valid PM2.5 range
-            prediction = max(0.0, min(prediction, 999.0))
-            forecast_values.append(round(prediction, 2))
+    for _ in range(24):
+        feature_df = _build_feature_row(current_readings, feature_cols)
+        dmatrix    = xgb.DMatrix(feature_df, feature_names=feature_cols)
+        prediction = float(model.predict(dmatrix)[0])
+        prediction = max(0.0, min(prediction, 999.0))
+        forecast_values.append(round(prediction, 2))
 
-            # Append synthetic reading for next iteration (rolling lag window)
-            last = dict(current_readings[-1])
-            last["pm25"] = prediction
-            current_readings.append(last)
-            if len(current_readings) > 48:
-                current_readings = current_readings[-48:]
+        last         = dict(current_readings[-1])
+        last["pm25"] = prediction
+        current_readings.append(last)
+        if len(current_readings) > 48:
+            current_readings = current_readings[-48:]
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}")
-
-    # --- Persist to DB ---
-    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    generated_at     = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     forecast_payload = json.dumps({
         "generated_at":  generated_at,
         "horizon_hours": 24,
@@ -145,6 +126,71 @@ def get_forecast(station_name: str):
         "note":          "XGBoost iterative 24h rollout",
     })
     upsert_forecast(station_name, generated_at, forecast_payload)
+    return forecast_values
+
+
+# ---------------------------------------------------------------------------
+# Router endpoint
+# ---------------------------------------------------------------------------
+
+def _is_fresh(generated_at_str: str, ttl_minutes: int = FORECAST_TTL_MINUTES) -> bool:
+    """Return True if generated_at is within ttl_minutes of now (UTC)."""
+    try:
+        generated_at = datetime.strptime(generated_at_str, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+        age = datetime.now(timezone.utc) - generated_at
+        return age < timedelta(minutes=ttl_minutes)
+    except Exception:
+        return False
+
+
+@router.get("/forecast/{station_name}")
+def get_forecast(station_name: str):
+    """
+    Return a 24-element PM2.5 forecast array for the given station.
+
+    Cache-hit: if a DB forecast exists and is < 60 min old, return it
+    immediately (no inference). Cache-miss: run XGBoost, persist, return.
+    """
+    # --- Check cache first ---
+    cached = get_latest_forecast(station_name)
+    if cached:
+        try:
+            payload = json.loads(cached["forecast_json"])
+            generated_at = payload.get("generated_at") or cached.get("generated_at", "")
+            if _is_fresh(generated_at):
+                logger.info("Cache HIT for %s (age < %d min)", station_name, FORECAST_TTL_MINUTES)
+                return {
+                    "station":        station_name,
+                    "generated_at":   generated_at,
+                    "forecast_hours": payload["values"],
+                    "horizon":        24,
+                    "unit":           "µg/m³",
+                    "cache":          "hit",
+                }
+        except Exception as exc:
+            logger.warning("Cache parse error for %s: %s — running fresh inference.", station_name, exc)
+
+    # --- Cache miss: run inference ---
+    try:
+        get_model()
+        get_feature_cols()
+    except FileNotFoundError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"ML model not found. Run model training first. ({e})"
+        )
+
+    try:
+        forecast_values = _run_forecast_for_station(station_name)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}")
+
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    logger.info("Cache MISS for %s — fresh inference complete.", station_name)
 
     return {
         "station":        station_name,
@@ -152,4 +198,5 @@ def get_forecast(station_name: str):
         "forecast_hours": forecast_values,
         "horizon":        24,
         "unit":           "µg/m³",
+        "cache":          "miss",
     }
