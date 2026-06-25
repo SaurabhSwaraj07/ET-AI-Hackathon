@@ -1,0 +1,24 @@
+{
+  "model": "XGBoost",
+  "target": "pm25_next_1h",
+  "n_features": 22,
+  "train_rows": 32756,
+  "test_rows": 8189,
+  "best_round": 70,
+  "model_rmse": 16.2663,
+  "model_mae": 6.6827,
+  "model_r2": 0.457,
+  "baseline_rmse": 17.5104,
+  "baseline_mae": 5.3086,
+  "improvement_pct": 7.1,
+  "stations": [
+    "BTM Layout",
+    "Hombegowda Nagar",
+    "Jayanagar 5th Block",
+    "Jigani",
+    "Kasturi Nagar",
+    "Peenya",
+    "Silk Board"
+  ],
+  "split_date": "2025-10-26 00:00:00"
+}
