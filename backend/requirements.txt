@@ -4,7 +4,7 @@ python-dotenv==1.0.1
 httpx==0.27.2
 pandas==2.2.3
 numpy==1.26.4
-xgboost==2.1.1
+xgboost==2.1.4
 scikit-learn==1.5.2
 shap==0.46.0
 matplotlib==3.9.2
@@ -12,3 +12,7 @@ apscheduler==3.10.4
 google-generativeai==0.8.3
 jupyter==1.1.1
 requests==2.32.3
+joblib==1.5.3
+# NOTE: xgboost==2.1.4 and shap==0.46.0 must be pinned together.
+# Newer xgboost versions conflict with shap 0.46.x.
+# Do NOT run pip install --upgrade on either package.
