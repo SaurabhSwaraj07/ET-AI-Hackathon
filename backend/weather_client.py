@@ -5,6 +5,7 @@ weather_client.py — Fetches current weather for Bengaluru via OpenWeather API.
 - Caches live data for CACHE_TTL_SECONDS to avoid quota burn.
 - Returns a dict whose keys match _build_feature_row() exactly.
 """
+import math
 import time
 import logging
 
@@ -38,8 +39,7 @@ def _fetch_from_api() -> dict:
     Call OpenWeather Current Weather API (v2.5) and return a normalised dict.
     Raises requests.RequestException on HTTP/network failure.
     """
-    # url = "https://api.openweathermap.org/data/2.5/weather"
-    url = "https://api.openweathermap.org/data/4.0/onecall/timeline/1h"
+    url = "https://api.openweathermap.org/data/2.5/weather"  # FIX: was data/4.0/onecall
 
     params = {
         "lat":   OPENWEATHER_LAT,
@@ -51,14 +51,13 @@ def _fetch_from_api() -> dict:
     resp.raise_for_status()
     data = resp.json()
 
-    wind      = data.get("wind", {})
-    main      = data.get("main", {})
-    rain      = data.get("rain", {})
-    wind_deg  = float(wind.get("deg", 180.0))
-    wind_spd  = float(wind.get("speed", 5.0))
+    wind     = data.get("wind", {})
+    main     = data.get("main", {})
+    rain     = data.get("rain", {})
+    wind_deg = float(wind.get("deg", 180.0))
+    wind_spd = float(wind.get("speed", 5.0))
 
     # Decompose wind speed into u/v components (meteorological convention)
-    import math
     wind_rad = math.radians(wind_deg)
     u = -wind_spd * math.sin(wind_rad)
     v = -wind_spd * math.cos(wind_rad)

@@ -15,7 +15,8 @@ from fastapi.staticfiles import StaticFiles
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from database import init_db
-from routers import stations, forecast, attribution, advisory
+from routers import stations, forecast, attribution
+import advisory
 from routers.health import router as health_router
 from routers.forecast import _run_forecast_for_station
 
@@ -110,7 +111,7 @@ if os.path.isdir(ML_DIR):
 app.include_router(stations.router,    prefix="/api")
 app.include_router(forecast.router,    prefix="/api")
 app.include_router(attribution.router, prefix="/api")
-app.include_router(advisory.router,    prefix="/api")
+app.include_router(advisory.router, prefix="/api")
 app.include_router(health_router,      prefix="/api")
 
 
