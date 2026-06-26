@@ -28,7 +28,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 STATION_NAMES = [
     "Peenya",
     "BTM Layout",
-    "Hebbal",
     "Jayanagar",
     "Yeshwanthpur",
     "Silk Board",

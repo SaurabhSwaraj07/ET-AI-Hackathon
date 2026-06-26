@@ -1,83 +1,97 @@
 """
 advisory.py — GET /api/advisory/{station_name}
-Returns a rule-based air quality advisory (Gemini LLM wired on Day 9).
-"""
-from fastapi import APIRouter, HTTPException
-from database import get_latest_reading
 
+Day 8: refactored with generate_advisory() as the single callable.
+Day 9: swap _gemini_advisory() stub for real Gemini call.
+"""
+import logging
+
+from fastapi import APIRouter, HTTPException
+
+from database import get_recent_readings
+from config import GEMINI_ENABLED
+
+logger = logging.getLogger("airiq.advisory")
 router = APIRouter(tags=["advisory"])
 
 
-def _pm25_to_category(pm25: float) -> tuple[str, str]:
-    """
-    Map PM2.5 (µg/m³) to AQI category + advisory text.
-    Using WHO/CPCB breakpoints.
-    Returns (category, advisory_text).
-    """
-    if pm25 < 12.0:
-        return (
-            "Good",
-            "Air quality is satisfactory. Outdoor activities are safe for all groups.",
-        )
-    elif pm25 < 35.5:
-        return (
-            "Moderate",
-            "Air quality is acceptable. Unusually sensitive individuals should consider "
-            "reducing prolonged outdoor exertion.",
-        )
-    elif pm25 < 55.5:
-        return (
-            "Unhealthy for Sensitive Groups",
-            "Members of sensitive groups (children, elderly, those with respiratory "
-            "conditions) may experience health effects. Consider reducing outdoor activity.",
-        )
-    elif pm25 < 150.5:
-        return (
-            "Unhealthy",
-            "Everyone may begin to experience health effects. Sensitive groups should "
-            "avoid outdoor exertion. Wear an N95 mask if going outside.",
-        )
-    elif pm25 < 250.5:
-        return (
-            "Very Unhealthy",
-            "Health alert: everyone should avoid outdoor exertion. Sensitive groups "
-            "should remain indoors. Air purifiers recommended.",
-        )
-    else:
-        return (
-            "Hazardous",
-            "Emergency health warning. Everyone should avoid all outdoor activity. "
-            "Keep windows closed and use air purifiers.",
-        )
+# ---------------------------------------------------------------------------
+# AQI breakpoints (CPCB India, PM2.5 µg/m³ 24-hour average)
+# ---------------------------------------------------------------------------
+_AQI_LEVELS = [
+    (30,   "Good",          "Air quality is satisfactory. Outdoor activities are safe."),
+    (60,   "Satisfactory",  "Minor discomfort for very sensitive individuals. Most people unaffected."),
+    (90,   "Moderate",      "Sensitive groups (children, elderly, respiratory patients) should limit prolonged outdoor exertion."),
+    (120,  "Poor",          "Everyone may experience health effects. Sensitive groups should avoid outdoor activities."),
+    (250,  "Very Poor",     "Health alert: everyone should avoid prolonged outdoor exertion. Wear N95 indoors if needed."),
+    (float("inf"), "Severe", "Health emergency: avoid all outdoor activity. Wear N95/FFP2 masks indoors."),
+]
 
+
+def _rule_based_advisory(pm25: float) -> dict:
+    """Return AQI category + advisory text from CPCB PM2.5 breakpoints."""
+    for threshold, category, message in _AQI_LEVELS:
+        if pm25 <= threshold:
+            return {
+                "category": category,
+                "message":  message,
+                "pm25":     round(pm25, 2),
+                "source":   "rule-based",
+            }
+    # Fallback (should not reach here)
+    return {
+        "category": "Severe",
+        "message":  _AQI_LEVELS[-1][2],
+        "pm25":     round(pm25, 2),
+        "source":   "rule-based",
+    }
+
+
+def _gemini_advisory(station_name: str, pm25: float) -> dict:
+    """
+    Day 9 stub — replaced by real Gemini call when GEMINI_API_KEY is set.
+    Raises NotImplementedError so generate_advisory() falls back to rule-based.
+    """
+    raise NotImplementedError("Gemini advisory not wired yet — Day 9 task.")
+
+
+def generate_advisory(station_name: str, pm25: float) -> dict:
+    """
+    Single callable for advisory generation.
+    Uses Gemini when GEMINI_ENABLED, falls back to rule-based on any error.
+    """
+    if GEMINI_ENABLED:
+        try:
+            return _gemini_advisory(station_name, pm25)
+        except NotImplementedError:
+            logger.debug("Gemini stub hit — falling back to rule-based advisory.")
+        except Exception as exc:
+            logger.warning("Gemini advisory failed for %s: %s — using rule-based.", station_name, exc)
+
+    return _rule_based_advisory(pm25)
+
+
+# ---------------------------------------------------------------------------
+# Router
+# ---------------------------------------------------------------------------
 
 @router.get("/advisory/{station_name}")
 def get_advisory(station_name: str):
     """
-    Return AQ advisory for the given station based on latest PM2.5.
-    Rule-based stub — Gemini LLM integration added Day 9.
+    Return an AQ advisory for the station based on the latest PM2.5 reading.
+    Response includes a 'source' field: 'rule-based' or 'gemini'.
     """
-    latest = get_latest_reading(station_name)
-    if not latest:
+    readings = get_recent_readings(station_name, n=1)
+    if not readings:
         raise HTTPException(
             status_code=404,
-            detail=f"No readings found for station '{station_name}'."
+            detail=f"No readings found for station '{station_name}'.",
         )
 
-    pm25 = latest.get("pm25")
-    if pm25 is None:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Latest reading for '{station_name}' has null PM2.5."
-        )
-
-    category, advisory_text = _pm25_to_category(pm25)
+    pm25 = float(readings[-1].get("pm25") or 0.0)
+    advisory = generate_advisory(station_name, pm25)
 
     return {
-        "station":   station_name,
-        "pm25":      round(pm25, 2),
-        "timestamp": latest.get("timestamp"),
-        "category":  category,
-        "advisory":  advisory_text,
-        "source":    "rule-based",  # changes to "gemini-1.5-flash" on Day 9
+        "station":  station_name,
+        "advisory": advisory,
     }

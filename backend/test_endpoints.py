@@ -98,7 +98,7 @@ def check_cache(label_miss: str, label_hit: str, url: str):
 
 def main():
     print("=" * 60)
-    print("AirIQ — Day 7 Endpoint Smoke Test")
+    print("AirIQ — Day 8 Endpoint Smoke Test")
     print(f"Target : {BASE_URL}")
     print("=" * 60)
 
@@ -133,6 +133,42 @@ def main():
     else:
         print(f"❌ {len(failures)} check(s) failed: {failures}")
         sys.exit(1)
+
+        # Day 8: advisory source field
+        print()
+        print("--- Day 8: advisory source field ---")
+        check("GET /api/advisory/{station} — source field present",
+              f"{BASE_URL}/api/advisory/{TEST_STATION}", "advisory")
+
+        # Inline source-field check
+        try:
+            r = httpx.get(f"{BASE_URL}/api/advisory/{TEST_STATION}", timeout=15)
+            source = r.json().get("advisory", {}).get("source", "MISSING")
+            if source in ("rule-based", "gemini"):
+                print(f"{PASS} advisory.source = '{source}'")
+            else:
+                print(f"{FAIL} advisory.source unexpected value: '{source}'")
+                failures.append("advisory.source field")
+        except Exception as e:
+            print(f"{FAIL} advisory.source check [EXCEPTION: {e}]")
+            failures.append("advisory.source field")
+
+        # Day 8: forecast response structure unchanged after weather-client wiring
+        print()
+        print("--- Day 8: forecast structure after weather-client wiring ---")
+        try:
+            r = httpx.get(f"{BASE_URL}/api/forecast/{TEST_STATION}", timeout=60)
+            data = r.json()
+            required_keys = {"station", "generated_at", "forecast_hours", "horizon", "unit", "cache"}
+            missing = required_keys - data.keys()
+            if r.status_code == 200 and not missing:
+                print(f"{PASS} Forecast response structure intact  (cache={data.get('cache')})")
+            else:
+                print(f"{FAIL} Forecast missing keys: {missing}  [status={r.status_code}]")
+                failures.append("forecast structure Day 8")
+        except Exception as e:
+            print(f"{FAIL} forecast structure check [EXCEPTION: {e}]")
+            failures.append("forecast structure Day 8")
 
 
 if __name__ == "__main__":

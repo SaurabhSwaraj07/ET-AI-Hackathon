@@ -28,10 +28,16 @@ FORECAST_TTL_MINUTES = 60  # cache lifetime
 # Feature engineering (shared with attribution.py)
 # ---------------------------------------------------------------------------
 
+
+from weather_client import get_current_weather   # ADD THIS IMPORT at the top of the file
+
 def _build_feature_row(readings: list[dict], feature_cols: list[str]) -> pd.DataFrame:
     """
     Build a single-row feature DataFrame from the last 48 readings.
     Matches the exact column order from feature_cols.json.
+
+    Day 8: weather fields sourced from weather_client (live or ERA5 fallback).
+    Day 9: live values flow automatically once OPENWEATHER_API_KEY is set.
     """
     if not readings:
         raise ValueError("No readings available for feature engineering.")
@@ -51,6 +57,9 @@ def _build_feature_row(readings: list[dict], feature_cols: list[str]) -> pd.Data
     except Exception:
         ts = pd.Timestamp.now()
 
+    # Fetch weather — returns live data or ERA5 fallback transparently
+    wx = get_current_weather()
+
     row = {
         "pm25":                   latest.get("pm25")  or 0.0,
         "pm10":                   latest.get("pm10")  or 0.0,
@@ -65,16 +74,16 @@ def _build_feature_row(readings: list[dict], feature_cols: list[str]) -> pd.Data
         "dayofweek":              ts.dayofweek,
         "month":                  ts.month,
         "is_weekend":             int(ts.dayofweek >= 5),
-        # Weather placeholders — replaced by OpenWeather on Day 9
-        "temperature_2m":         28.0,
-        "relative_humidity_2m":   60.0,
-        "wind_speed_10m":         5.0,
-        "wind_direction_10m":     180.0,
-        "surface_pressure":       912.0,
-        "precipitation":          0.0,
-        "u_component_of_wind":    0.0,
-        "v_component_of_wind":    0.0,
-        "boundary_layer_height":  500.0,
+        # Weather — live via OpenWeather or ERA5 fallback
+        "temperature_2m":         wx["temperature_2m"],
+        "relative_humidity_2m":   wx["relative_humidity_2m"],
+        "wind_speed_10m":         wx["wind_speed_10m"],
+        "wind_direction_10m":     wx["wind_direction_10m"],
+        "surface_pressure":       wx["surface_pressure"],
+        "precipitation":          wx["precipitation"],
+        "u_component_of_wind":    wx["u_component_of_wind"],
+        "v_component_of_wind":    wx["v_component_of_wind"],
+        "boundary_layer_height":  wx["boundary_layer_height"],
     }
 
     df = pd.DataFrame([row])
